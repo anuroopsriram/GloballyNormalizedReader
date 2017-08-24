@@ -246,6 +246,29 @@ def featurize_question(model, questions, embedding_dropout, training):
     return tf.concat(axis=1, values=[final_states, passage_indep_embedding])
 
 
+def doc_self_alignment(documents, hidden_dimension):
+
+    def mlp(x, reuse=None):
+        with tf.variable_scope("MLP0", reuse=reuse):
+            h = tf.contrib.layers.fully_connected(
+                inputs=x,
+                num_outputs=hidden_dimension,
+                activation_fn=tf.nn.relu)
+        with tf.variable_scope("MLP1", reuse=reuse):
+            h = tf.contrib.layers.fully_connected(
+                inputs=h,
+                num_outputs=hidden_dimension,
+                activation_fn=None)
+        return h
+
+    docs = mlp(documents)
+    
+    scores = tf.matmul(docs, docs, transpose_b=True)
+    alphas = tf.nn.softmax(scores, dim=-1)
+
+    return tf.matmul(alphas, docs)
+
+
 def question_aligned_embeddings(documents, questions, hidden_dimension):
 
     def mlp(x, reuse=None):
@@ -269,6 +292,19 @@ def question_aligned_embeddings(documents, questions, hidden_dimension):
     alphas = tf.nn.softmax(scores, dim=-1)
 
     return tf.matmul(alphas, questions)
+
+
+def gate_document_embeds(document_embeds):
+    def gate(x, reuse=None):
+        with tf.variable_scope("MLP0", reuse=reuse):
+            h = tf.contrib.layers.fully_connected(
+                inputs=x,
+                num_outputs=x.get_shape().as_list()[2],
+                activation_fn=tf.nn.sigmoid)
+            return h
+
+    gates = gate(document_embeds)
+    return gates * document_embeds
 
 
 def featurize_document(model, questions, documents, same_as_question,
@@ -312,12 +348,18 @@ def featurize_document(model, questions, documents, same_as_question,
     document_embeddings = tf.nn.dropout(document_embeddings,
                                         embedding_dropout)
 
+    with tf.variable_scope("DocEmbedGating"):
+        document_embeddings = gate_document_embeds(document_embeddings)
+
     with tf.variable_scope("DocumentLSTMs"):
         hiddens, _, _ = ops.cudnn_lstm(document_embeddings,
                                        model.document_layers,
                                        model.layer_size,
                                        model.weight_noise,
                                        training)
+
+    with tf.variable_scope("DocSelfAlignment"):
+        hiddens = tf.concat(axis=2, values=[hiddens, doc_self_alignment(hiddens, model.layer_size)])
 
     return hiddens
 
